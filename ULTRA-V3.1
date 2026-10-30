@@ -1,0 +1,189 @@
+(async function dynamicStudioConsoleEngine() {
+    const videoElement = document.querySelector('video');
+    if (!videoElement) {
+        console.error("❌ Abra um vídeo do YouTube antes de rodar o script!");
+        return;
+    }
+
+    if (window.meuEstudioAudioCtx) {
+        window.meuEstudioAudioCtx.close();
+    }
+
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioContext();
+    window.meuEstudioAudioCtx = ctx;
+
+    const source = ctx.createMediaElementSource(videoElement);
+
+    // --- RACK DE EQUALIZAÇÃO ---
+    const criarFiltro = (tipo, freq, ganho = 0, q = 1) => {
+        const f = ctx.createBiquadFilter();
+        f.type = tipo; f.frequency.value = freq; f.Q.value = q; f.gain.value = ganho;
+        return f;
+    };
+    const subBass = criarFiltro('lowshelf', 55);    
+    const bass = criarFiltro('peaking', 150);       
+    const midLow = criarFiltro('peaking', 520);     
+    const midHigh = criarFiltro('peaking', 3000);   
+    const air = criarFiltro('highshelf', 11500);    
+
+    // --- ENGRENAGEM DE REVERB CONTROLÁVEL ---
+    const reverbNode = ctx.createConvolver();
+    const dryGain = ctx.createGain(); 
+    const wetGain = ctx.createGain(); 
+    const preDelayNode = ctx.createDelay();
+
+    // Estado dos parâmetros dinâmicos de Reverb
+    let paramDuracao = 3.5;
+    let paramDecaimento = 2.5;
+    let paramModulacao = 0.08;
+
+    // --- LIMITADOR DE PROTEÇÃO ---
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = -0.5;
+    limiter.knee.value = 10;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.001;
+    limiter.release.value = 0.05;
+
+    // Gerador de Ambiência Dinâmico baseado nas variáveis físicas do painel
+    function recalcularReverb() {
+        const rate = ctx.sampleRate;
+        const totalAmostras = Math.max(rate * 0.1, rate * paramDuracao);
+        const buffer = ctx.createBuffer(2, totalAmostras, rate);
+        
+        for (let canal = 0; canal < 2; canal++) {
+            const dados = buffer.getChannelData(canal);
+            const inversaoFase = canal === 1 ? -1 : 1;
+            
+            for (let i = 0; i < totalAmostras; i++) {
+                const tempo = i / rate;
+                const ruidoTextura = (Math.random() * 2 - 1) * Math.sin(i * paramModulacao);
+                const reflexaoTardia = Math.sin(tempo * 220 * inversaoFase) * 0.15;
+                dados[i] = (ruidoTextura + reflexaoTardia) * Math.pow(1 - i / totalAmostras, paramDecaimento);
+            }
+        }
+        reverbNode.buffer = buffer;
+    }
+
+    // Ligações do circuito de áudio
+    source.connect(subBass);
+    subBass.connect(bass);
+    bass.connect(midLow);
+    midLow.connect(midHigh);
+    midHigh.connect(air);
+
+    air.connect(dryGain);
+    
+    air.connect(preDelayNode);
+    preDelayNode.connect(reverbNode);
+    reverbNode.connect(wetGain);
+
+    dryGain.connect(limiter);
+    wetGain.connect(limiter);
+    limiter.connect(ctx.destination);
+
+    // Valores iniciais estáveis
+    recalcularReverb();
+
+    // --- INTERFACE DE CONTROLE DE HARDWARE VST ---
+    const painel = document.createElement('div');
+    painel.id = 'studio-rack-sliders';
+    painel.style.cssText = 'position:fixed; top:80px; right:25px; z-index:999999; background:rgba(12,12,14,0.98); padding:18px; border-radius:14px; border:2px solid #00ffcc; color:#fff; font-family: monospace; box-shadow:0 0 25px rgba(0,255,204,0.3); width:280px;';
+
+    const header = document.createElement('div');
+    header.textContent = '🎛️ DYNAMIC LIVE DA-CONVOLUTION';
+    header.style.cssText = 'margin:0 0 15px 0; text-align:center; color:#00ffcc; font-size:11px; font-weight:bold; letter-spacing:1px; border-bottom:1px solid #222; padding-bottom:10px;';
+    painel.appendChild(header);
+
+    // Helper para criar sliders e labels associados de forma nativa e limpa
+    function criarSliderControle(id, min, max, passo, valorInicial, labelTexto, sufixo, callback) {
+        const container = document.createElement('div');
+        container.style.cssText = 'margin-bottom: 12px;';
+
+        const labelDiv = document.createElement('div');
+        labelDiv.style.cssText = 'display:flex; justify-content:between; font-size:10px; color:#aaa; margin-bottom:4px;';
+        
+        const textoSpan = document.createElement('span');
+        textoSpan.textContent = labelTexto;
+        
+        const valorSpan = document.createElement('span');
+        valorSpan.textContent = `${valorInicial}${sufixo}`;
+        valorSpan.style.color = '#00ffcc';
+
+        labelDiv.appendChild(textoSpan);
+        // Empurra o valor para o canto direito
+        const spacer = document.createElement('span'); spacer.style.flex = '1'; labelDiv.appendChild(spacer);
+        labelDiv.appendChild(valorSpan);
+
+        const slider = document.createElement('input');
+        slider.type = 'range';
+        slider.min = min; slider.max = max; slider.step = passo; slider.value = valorInicial;
+        slider.style.cssText = 'width:100%; accent-color:#00ffcc; background:#222; cursor:pointer; height:4px; border-radius:2px;';
+
+        slider.oninput = (e) => {
+            const val = parseFloat(e.target.value);
+            valorSpan.textContent = `${val}${sufixo}`;
+            callback(val);
+        };
+
+        container.appendChild(labelDiv);
+        container.appendChild(slider);
+        painel.appendChild(container);
+    }
+
+    // --- INSTANCIAÇÃO DOS CONTROLES EM TEMPO REAL ---
+    
+    // 1. Ganho de Efeito (Wet Mix)
+    criarSliderControle('wetMix', 0, 0.6, 0.01, 0.20, '🎚️ MIX DE REVERB (VOLUME)', '', (v) => {
+        wetGain.gain.value = v;
+    });
+    wetGain.gain.value = 0.20;
+
+    // 2. Duração da Cauda (Tamanho do Ambiente)
+    criarSliderControle('roomSize', 0.2, 10.0, 0.1, 3.5, '🏛️ TAMANHO DO ESPAÇO (DECAY)', 's', (v) => {
+        paramDuracao = v;
+        recalcularReverb();
+    });
+
+    // 3. Pre-Delay (Separação entre áudio limpo e o eco)
+    criarSliderControle('preDelay', 0, 100, 1, 30, '⏱️ PRE-DELAY ACÚSTICO', 'ms', (v) => {
+        preDelayNode.delayTime.value = v / 1000;
+    });
+    preDelayNode.delayTime.value = 30 / 1000;
+
+    // 4. Difusão / Densidade Harmônica
+    criarSliderControle('diffusion', 0.01, 0.3, 0.01, 0.08, '🌌 TEXTURA / MODULAÇÃO FASE', '', (v) => {
+        paramModulacao = v;
+        recalcularReverb();
+    });
+
+    // Separador para o Equalizador
+    const sep = document.createElement('div');
+    sep.style.cssText = 'border-top: 1px dashed #222; margin: 15px 0 10px 0;';
+    painel.appendChild(sep);
+
+    // 5. Controle de Peso do Grave (Sub-Bass)
+    criarSliderControle('eqSub', -5, 12, 0.5, 5, '🔊 GAIN SUB-GRAVES (55Hz)', 'dB', (v) => {
+        subBass.gain.value = v;
+    });
+    subBass.gain.value = 5;
+
+    // 6. Controle de Brilho de Estúdio (Air Agudos)
+    criarSliderControle('eqAir', -5, 10, 0.5, 4, '✨ GAIN BRILHO CRISTALINO (11kHz)', 'dB', (v) => {
+        air.gain.value = v;
+    });
+    air.gain.value = 4;
+
+    // Botão Fechar Avançado
+    const fechar = document.createElement('div');
+    fechar.textContent = '✕';
+    fechar.style.cssText = 'position:absolute; top:6px; right:12px; cursor:pointer; color:#444; font-size:11px; font-weight:bold;';
+    fechar.onmouseenter = () => fechar.style.color = '#ff4444';
+    fechar.onmouseleave = () => fechar.style.color = '#444';
+    fechar.onclick = () => painel.remove();
+    painel.appendChild(fechar);
+
+    document.body.appendChild(painel);
+    console.log("%c 💎 [STUDIO METER] Rack de controle paramétrico manual carregado!", "color: #00ffcc; font-weight: bold;");
+})();
